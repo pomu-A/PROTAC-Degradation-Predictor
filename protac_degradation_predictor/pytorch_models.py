@@ -2,7 +2,9 @@ import warnings
 import pickle
 import logging
 from typing import Literal, List, Tuple, Optional, Dict
-
+from torchmetrics.regression import MeanSquaredError, MeanAbsoluteError
+from torchmetrics import R2Score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from .protac_dataset import PROTAC_Dataset, get_datasets
 from .config import config
 
@@ -218,12 +220,19 @@ class PROTAC_Model(pl.LightningModule):
         )
 
         stages = ['train_metrics', 'val_metrics', 'test_metrics']
+        # self.metrics = nn.ModuleDict({s: MetricCollection({
+        #     'acc': Accuracy(task='binary'),
+        #     'roc_auc': AUROC(task='binary'),
+        #     'precision': Precision(task='binary'),
+        #     'recall': Recall(task='binary'),
+        #     'f1_score': F1Score(task='binary'),
+        # }, prefix=s.replace('metrics', '')) for s in stages})
+
+        # when regression
         self.metrics = nn.ModuleDict({s: MetricCollection({
-            'acc': Accuracy(task='binary'),
-            'roc_auc': AUROC(task='binary'),
-            'precision': Precision(task='binary'),
-            'recall': Recall(task='binary'),
-            'f1_score': F1Score(task='binary'),
+            'mse': MeanSquaredError(),
+            'mae': MeanAbsoluteError(),
+            'r2': R2Score(),
         }, prefix=s.replace('metrics', '')) for s in stages})
 
         # Misc settings
@@ -314,7 +323,9 @@ class PROTAC_Model(pl.LightningModule):
         y = batch['active'].float().unsqueeze(1)
 
         y_hat = self.forward(poi_emb, e3_emb, cell_emb, smiles_emb)
-        loss = F.binary_cross_entropy_with_logits(y_hat, y)
+        # loss = F.binary_cross_entropy_with_logits(y_hat, y)
+        # when regression:
+        loss = F.l1_loss(y_hat, y)
 
         self.metrics[f'{stage}_metrics'].update(y_hat, y)
         self.log(f'{stage}_loss', loss, on_epoch=True, prog_bar=True)
@@ -362,13 +373,22 @@ class PROTAC_Model(pl.LightningModule):
             'monitor': 'val_loss',
         }
 
+    # def predict_step(self, batch, batch_idx):
+    #     poi_emb = batch['poi_emb']
+    #     e3_emb = batch['e3_emb']
+    #     cell_emb = batch['cell_emb']
+    #     smiles_emb = batch['smiles_emb']
+    #     y_hat = self.forward(poi_emb, e3_emb, cell_emb, smiles_emb)
+    #     return torch.sigmoid(y_hat)
+
+    # when regression
     def predict_step(self, batch, batch_idx):
         poi_emb = batch['poi_emb']
         e3_emb = batch['e3_emb']
         cell_emb = batch['cell_emb']
         smiles_emb = batch['smiles_emb']
         y_hat = self.forward(poi_emb, e3_emb, cell_emb, smiles_emb)
-        return torch.sigmoid(y_hat)
+        return y_hat
 
     def train_dataloader(self):
         if self.train_dataset is None:
@@ -463,6 +483,38 @@ def get_confidence_scores(
 
     return false_positives_mean, false_negatives_mean
 
+def get_regression_errors(
+        true_vals: np.ndarray | torch.Tensor,
+        y_preds: np.ndarray | torch.Tensor
+) -> Tuple[float, float]:
+    """
+    Calculate mean squared error (MSE) and mean absolute error (MAE) for regression predictions.
+
+    Args:
+        true_vals (np.ndarray | torch.Tensor): The true labels
+        y_preds (np.ndarray | torch.Tensor): The predictions
+
+    Returns:
+        Tuple[float, float]: MSE and MAE between true values and predictions.
+    """
+
+    if isinstance(true_vals, torch.Tensor):
+        true_vals = true_vals.cpu().numpy()
+    if isinstance(y_preds, torch.Tensor):
+        y_preds = y_preds.cpu().numpy()
+
+    # Ensure both are 1D arrays
+    true_vals = np.array(true_vals).flatten()
+    y_preds = np.array(y_preds).flatten()
+
+    # Ensure shapes match
+    assert true_vals.shape == y_preds.shape, f"Shape mismatch: true_vals {true_vals.shape}, y_preds {y_preds.shape}"
+
+    # Calculate errors
+    mse = ((y_preds - true_vals) ** 2).mean()
+    mae = np.abs(y_preds - true_vals).mean()
+
+    return mse, mae
 
 # TODO: Use some sort of **kwargs to pass all the parameters to the model...
 def train_model(
@@ -566,9 +618,9 @@ def train_model(
             verbose=False,
         ),
         pl.callbacks.EarlyStopping(
-            monitor='train_acc',
+            monitor='train_mae', # when regression
             patience=10,
-            mode='max',
+            mode='min',
             verbose=False,
         ),
         pl.callbacks.EarlyStopping(
@@ -578,19 +630,28 @@ def train_model(
             verbose=False,
         ),
         pl.callbacks.EarlyStopping(
-            monitor='val_acc',
+            monitor='val_mae',  # when regression
             patience=10, # Original: 10
-            mode='max',
+            mode='min',
             verbose=False,
         ),
     ]
     if use_logger:
         callbacks.append(pl.callbacks.LearningRateMonitor(logging_interval='step'))
     if enable_checkpointing:
+        # callbacks.append(pl.callbacks.ModelCheckpoint(
+        #     monitor='val_acc',
+        #     mode='max',
+        #     verbose=False,
+        #     filename=checkpoint_model_name + '-{epoch}-{val_acc:.2f}-{val_roc_auc:.3f}',
+        # ))
+
+        # when regression
         callbacks.append(pl.callbacks.ModelCheckpoint(
-            monitor='val_acc',
-            mode='max',
+            monitor='val_mae',  # change for regression 
+            mode='min',  # change for regression 
             verbose=False,
+            # filename=checkpoint_model_name + '{epoch}-{val_mae:.2f}',  # change for regression 
             filename=checkpoint_model_name + '-{epoch}-{val_acc:.2f}-{val_roc_auc:.3f}',
         ))
     # Define Trainer
@@ -630,8 +691,37 @@ def train_model(
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        trainer.fit(model)
+        trainer.fit(model)  #Training
+
+    # when regression
+    #save y and y_hat
+    # val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    # val_pred = trainer.predict(model, val_dl)
+    # val_pred = torch.cat(val_pred).cpu().numpy().flatten()
+
+# # Ensure the lengths of predicted values and true values match
+#     assert len(val_pred) == len(val_df), f"Prediction length ({len(val_pred)}) does not match dataframe length ({len(val_df)})"
+#     print(f"Attempting to save file to: {logger_save_dir}/{logger_name}")
+#     model.save_predictions(val_df[active_label].values, val_pred, f'{logger_save_dir}/{logger_name}_val_predictions.csv')
+        
+#     if test_df is not None:
+#         test_dataloader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+#         test_pred = trainer.predict(model, test_dataloader)
+#         test_pred = torch.cat(test_pred).cpu().numpy().flatten()
+#         assert len(test_pred) == len(test_df), f"Test prediction length ({len(test_pred)}) does not match dataframe length ({len(test_df)})"
+#         model.save_predictions(test_df[active_label].values, test_pred, f'{logger_save_dir}/{logger_name}_test_predictions.csv')
+########## 
+
+
     metrics = {}
+
+# when regression
+    # for key, value in trainer.callback_metrics.items():
+    #     if isinstance(value, torch.Tensor):
+    #         metrics[key] = value.item()
+    #     else:
+    #         metrics[key] = value
+
     # Add train metrics
     train_metrics = {m: v.item() for m, v in trainer.callback_metrics.items() if 'train' in m}
     metrics.update(train_metrics)
@@ -650,7 +740,9 @@ def train_model(
     if return_predictions:
         val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
         val_pred = trainer.predict(model, val_dl)
-        val_pred = torch.concat(trainer.predict(model, val_dl)).squeeze()
+        #val_pred = torch.concat(trainer.predict(model, val_dl)).squeeze()
+        #when regression
+        val_pred = torch.cat(val_pred).cpu().numpy().flatten() 
 
         fp_mean, fn_mean = get_confidence_scores(val_ds, val_pred)
         metrics['val_false_positives_mean'] = fp_mean
@@ -658,8 +750,9 @@ def train_model(
 
         if test_df is not None:
             test_dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-            test_pred = torch.concat(trainer.predict(model, test_dl)).squeeze()
-
+            #test_pred = torch.concat(trainer.predict(model, test_dl)).squeeze()
+            # when regreiion
+            test_pred = torch.cat(trainer.predict(model, test_dl)).cpu().numpy().flatten()
             fp_mean, fn_mean = get_confidence_scores(test_ds, test_pred)
             metrics['test_false_positives_mean'] = fp_mean
             metrics['test_false_negatives_mean'] = fn_mean

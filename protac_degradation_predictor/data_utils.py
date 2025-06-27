@@ -110,8 +110,9 @@ def get_fingerprint(smiles: str, morgan_fpgen = None) -> np.ndarray:
 def is_active(
         DC50: float,
         Dmax: float,
-        pDC50_threshold: float = 7.0,
-        Dmax_threshold: float = 0.8,
+        #active_col: str = 'Active (Dmax 0.6, pDC50 6.0)',
+        pDC50_threshold: float = 6.0,
+        Dmax_threshold: float = 0.6,
         oring: bool = False, # Deprecated
 ) -> bool:
     """ Check if a PROTAC is active based on DC50 and Dmax.	

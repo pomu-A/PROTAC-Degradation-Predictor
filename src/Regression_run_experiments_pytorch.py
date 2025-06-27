@@ -4,6 +4,7 @@ from collections import defaultdict
 import warnings
 import logging
 from typing import Literal
+from sklearn.model_selection import KFold, GroupKFold
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -258,14 +259,15 @@ def preprocess_dmax(df, column_name='Dmax (%)'):
     return df
 
 def main(
-    active_col: str = 'Active (Dmax 0.6, pDC50 6.0)',
-    n_trials: int = 100,
+    active_col: str = 'pDC50', # When regression, change to Dmax or pDC50
+    
+    n_trials: int = 200,## can be more, regression
     fast_dev_run: bool = False,
     test_split: float = 0.1,
     cv_n_splits: int = 5,
     max_epochs: int = 200,
     run_sklearn: bool = False,
-    force_study: bool = False,
+    force_study: bool = True,
     experiments: str | Literal['all', 'standard', 'e3_ligase', 'similarity', 'target'] = 'all',
 ):
     """ Train a PROTAC model using the given datasets and hyperparameters.
@@ -283,39 +285,6 @@ def main(
     """
     pl.seed_everything(42)
 
-    # # Set the Column to Predict
-    # active_name = active_col.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '')
-
-    # # Get Dmax_threshold from the active_col
-    # Dmax_threshold = float(active_col.split('Dmax')[1].split(',')[0].strip('(').strip(')').strip())
-    # pDC50_threshold = float(active_col.split('pDC50')[1].strip('(').strip(')').strip())
-
-    # # Load the PROTAC dataset
-    # protac_df = pd.read_csv('../data/PROTAC-Degradation-DB.csv')
-
-    # # Map E3 Ligase Iap to IAP
-    # protac_df['E3 Ligase'] = protac_df['E3 Ligase'].str.replace('Iap', 'IAP')
-    # protac_df[active_col] = protac_df.apply(
-    #     lambda x: pdp.is_active(x['DC50 (nM)'], x['Dmax (%)'], pDC50_threshold=pDC50_threshold, Dmax_threshold=Dmax_threshold), axis=1
-    # )
-    # # Drop duplicates
-    # protac_df = protac_df.drop_duplicates(subset=['Smiles', 'Uniprot', 'E3 Ligase Uniprot', 'Cell Line Identifier', active_col])
-
-    # # Precompute fingerprints and average Tanimoto similarity
-    # smiles2fp, protac_df = get_smiles2fp_and_avg_tanimoto(protac_df)
-
-    # ## Get the test sets
-    # test_indeces = {}
-    # active_df = protac_df[protac_df[active_col].notna()].copy()
-    
-    # if experiments == 'standard' or experiments == 'all':
-    #     test_indeces['standard'] = get_random_split_indices(active_df, test_split)
-    # if experiments == 'target' or experiments == 'all':
-    #     test_indeces['target'] = get_target_split_indices(active_df, active_col, test_split)
-    # if experiments == 'similarity' or experiments == 'all':
-    #     test_indeces['similarity'] = get_tanimoto_split_indices(active_df, active_col, test_split, n_bins_tanimoto=100)
-    # if experiments == 'e3_ligase' or experiments == 'all':
-    #     test_indeces['e3_ligase'] = get_e3_ligase_split_indices(active_df)
 
     # Make directory ../reports if it does not exist
     if not os.path.exists('../reports'):
@@ -326,9 +295,9 @@ def main(
     cell2embedding = pdp.load_cell2embedding('../data/cell2embedding.pkl')
 
     studies_dir = '../data/studies'
-    train_val_perc = f'{int((1 - test_split) * 100)}'
-    test_perc = f'{int(test_split * 100)}'
-    active_name = active_col.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '')
+    train_val_perc = f'{float((1 - test_split))}'
+    test_perc = f'{float(test_split )}'
+    #active_name = active_col.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '')
 
     if experiments == 'all':
         experiments = ['standard', 'similarity', 'target']
@@ -337,34 +306,51 @@ def main(
 
     # Cross-Validation Training
     reports = defaultdict(list)
-    for split_type in experiments:
+    for split_type in experiments: 
 
-        train_val_filename = f'{split_type}_train_val_{train_val_perc}split_{active_name}.csv'
-        test_filename = f'{split_type}_test_{test_perc}split_{active_name}.csv'
+        train_val_filename = f'DC50_{split_type}_train_{train_val_perc}.csv'
+        test_filename = f'DC50_{split_type}_test_{test_perc}.csv'
         
         train_val_df = pd.read_csv(os.path.join(studies_dir, train_val_filename))
         test_df = pd.read_csv(os.path.join(studies_dir, test_filename))
+        # train_val_df= preprocess_dmax(train_val_df,'Dmax (%)')
+        # test_df= preprocess_dmax(test_df,'Dmax (%)')
+        train_val_df['DC50 (nM)'] = train_val_df['DC50 (nM)'].replace(0, np.nan)  # Replace 0 values in DC50 (nM) with NaN
+        train_val_df['pDC50'] = -safe_log10(train_val_df['DC50 (nM)'] * 1e-9)
 
+        # test_df, same treatment
+        test_df['DC50 (nM)'] = test_df['DC50 (nM)'].replace(0, np.nan)  # Replace 0 values in DC50 (nM) with NaN
+        test_df['pDC50'] = -safe_log10(test_df['DC50 (nM)'] * 1e-9)
+
+        # Replace infinite values with NaN
+        train_val_df['pDC50'] = train_val_df['pDC50'].replace([np.inf, -np.inf], np.nan)
+        test_df['pDC50'] = test_df['pDC50'].replace([np.inf, -np.inf], np.nan)
+
+        # Drop rows with NaN in the target column
+        train_val_df.dropna(subset=['pDC50'], inplace=True)
+        test_df.dropna(subset=['pDC50'], inplace=True)
+        print('lenth',len(train_val_df),len(test_df))
+        # train_val_df['pDC50'] = train_val_df['pDC50'] / 100
+        # test_df['pDC50'] = test_df['pDC50'] / 100
         # Get SMILES and precompute fingerprints dictionary
         unique_smiles = pd.concat([train_val_df, test_df])['Smiles'].unique().tolist()
         smiles2fp = {s: np.array(pdp.get_fingerprint(s)) for s in unique_smiles}
 
-        # Get the CV object
         if split_type == 'standard':
-            kf = StratifiedKFold(n_splits=cv_n_splits, shuffle=True, random_state=42)
+            kf = KFold(n_splits=cv_n_splits, shuffle=True, random_state=42)
             group = None
         elif split_type == 'e3_ligase':
-            kf = StratifiedKFold(n_splits=cv_n_splits, shuffle=True, random_state=42)
+            kf = GroupKFold(n_splits=cv_n_splits)  # GroupKFold does not support `shuffle`
             group = train_val_df['E3 Group'].to_numpy()
         elif split_type == 'similarity':
-            kf = StratifiedGroupKFold(n_splits=cv_n_splits, shuffle=True, random_state=42)
+            kf = GroupKFold(n_splits=cv_n_splits)
             group = train_val_df['Tanimoto Group'].to_numpy()
         elif split_type == 'target':
-            kf = StratifiedGroupKFold(n_splits=cv_n_splits, shuffle=True, random_state=42)
-            group = train_val_df['Uniprot Group'].to_numpy()
+            kf = GroupKFold(n_splits=cv_n_splits)
+            group = train_val_df['Uniprot Group'].to_numpy()  
 
         # Start the experiment
-        experiment_name = f'{split_type}_{active_name}_test_split_{test_split}'
+        experiment_name = f'DC50_200_{split_type}_regression_test_split_{test_split}'
         optuna_reports = pdp.hyperparameter_tuning_and_training( 
             protein2embedding=protein2embedding,
             cell2embedding=cell2embedding,
@@ -380,7 +366,8 @@ def main(
             max_epochs=max_epochs,
             logger_save_dir='../logs',
             logger_name=f'pytorch_{experiment_name}',
-            active_label=active_col,
+            active_label='pDC50',
+            #regression_label= Dmax,
             study_filename=f'../reports/study_pytorch_{experiment_name}.pkl',
             force_study=force_study,
         )

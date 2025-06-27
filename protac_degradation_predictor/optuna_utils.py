@@ -9,7 +9,7 @@ from .pytorch_models import (
     get_confidence_scores,
 )
 from .protac_dataset import get_datasets
-
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import torch
 import optuna
 from optuna.samplers import TPESampler, QMCSampler
@@ -75,34 +75,146 @@ def get_dataframe_stats(
         stats['perc_leaking_smiles_train_test'] = len(train_df[train_df['Smiles'].isin(leaking_smiles)]) / len(train_df)
     return stats
 
+def get_dataframe_stats_regression(
+        train_df = None,
+        val_df = None,
+        test_df = None,
+        active_label = 'Active',
+    ) -> Dict:
+    """ Get some statistics from the dataframes. """
+    stats = {}
+    if train_df is not None:
+        stats['train_len'] = len(train_df)
+        stats['train_active_avg'] = train_df[active_label].mean() # 对回归有用
+        stats['train_active_std'] = train_df[active_label].std()
+        #stats['train_avg_tanimoto_dist'] = train_df['Avg Tanimoto'].mean()
+    if val_df is not None:
+        stats['val_len'] = len(val_df)
+        stats['val_active_avg'] = val_df[active_label].mean()
+        stats['val_active_std'] = val_df[active_label].std()
+        #stats['val_avg_tanimoto_dist'] = val_df['Avg Tanimoto'].mean()
+    if test_df is not None:
+        stats['test_len'] = len(test_df)
+        stats['test_active_avg'] = test_df[active_label].mean()
+        stats['test_active_std'] = test_df[active_label].std()
+        #stats['test_avg_tanimoto_dist'] = test_df['Avg Tanimoto'].mean()
 
-def get_majority_vote_metrics(
+    if train_df is not None and val_df is not None:
+        leaking_uniprot = list(set(train_df['Uniprot']).intersection(set(val_df['Uniprot'])))
+        leaking_smiles = list(set(train_df['Smiles']).intersection(set(val_df['Smiles'])))
+        stats['num_leaking_uniprot_train_val'] = len(leaking_uniprot)
+        stats['num_leaking_smiles_train_val'] = len(leaking_smiles)
+        stats['perc_leaking_uniprot_train_val'] = len(train_df[train_df['Uniprot'].isin(leaking_uniprot)]) / len(train_df)
+        stats['perc_leaking_smiles_train_val'] = len(train_df[train_df['Smiles'].isin(leaking_smiles)]) / len(train_df)
+    if train_df is not None and test_df is not None:
+        leaking_uniprot = list(set(train_df['Uniprot']).intersection(set(test_df['Uniprot'])))
+        leaking_smiles = list(set(train_df['Smiles']).intersection(set(test_df['Smiles'])))
+        stats['num_leaking_uniprot_train_test'] = len(leaking_uniprot)
+        stats['num_leaking_smiles_train_test'] = len(leaking_smiles)
+        stats['perc_leaking_uniprot_train_test'] = len(train_df[train_df['Uniprot'].isin(leaking_uniprot)]) / len(train_df)
+        stats['perc_leaking_smiles_train_test'] = len(train_df[train_df['Smiles'].isin(leaking_smiles)]) / len(train_df)
+    return stats
+
+
+    if train_df is not None and val_df is not None:
+        leaking_uniprot = list(set(train_df['Uniprot']).intersection(set(val_df['Uniprot'])))
+        leaking_smiles = list(set(train_df['Smiles']).intersection(set(val_df['Smiles'])))
+        stats['num_leaking_uniprot_train_val'] = len(leaking_uniprot)
+        stats['num_leaking_smiles_train_val'] = len(leaking_smiles)
+        stats['perc_leaking_uniprot_train_val'] = len(train_df[train_df['Uniprot'].isin(leaking_uniprot)]) / len(train_df)
+        stats['perc_leaking_smiles_train_val'] = len(train_df[train_df['Smiles'].isin(leaking_smiles)]) / len(train_df)
+    if train_df is not None and test_df is not None:
+        leaking_uniprot = list(set(train_df['Uniprot']).intersection(set(test_df['Uniprot'])))
+        leaking_smiles = list(set(train_df['Smiles']).intersection(set(test_df['Smiles'])))
+        stats['num_leaking_uniprot_train_test'] = len(leaking_uniprot)
+        stats['num_leaking_smiles_train_test'] = len(leaking_smiles)
+        stats['perc_leaking_uniprot_train_test'] = len(train_df[train_df['Uniprot'].isin(leaking_uniprot)]) / len(train_df)
+        stats['perc_leaking_smiles_train_test'] = len(train_df[train_df['Smiles'].isin(leaking_smiles)]) / len(train_df)
+    
+    return stats
+
+# When Regression:
+def get_majority_vote_metrics(  
         test_preds: List,
         test_df: pd.DataFrame,
         active_label: str = 'Active',
 ) -> Dict:
     """ Get the majority vote metrics. """
-    test_preds_mean = np.array(test_preds).mean(axis=0)
-    logging.info(f'Test predictions: {test_preds}')
-    logging.info(f'Test predictions mean: {test_preds_mean}')
-    test_preds = torch.stack(test_preds)
-    test_preds, _ = torch.mode(test_preds, dim=0)
-    y = torch.tensor(test_df[active_label].tolist())
-    # Measure the test accuracy and ROC AUC
-    majority_vote_metrics = {
-        'test_acc': Accuracy(task='binary')(test_preds, y).item(),
-        'test_roc_auc': AUROC(task='binary')(test_preds, y).item(),
-        'test_precision': Precision(task='binary')(test_preds, y).item(),
-        'test_recall': Recall(task='binary')(test_preds, y).item(),
-        'test_f1_score': F1Score(task='binary')(test_preds, y).item(),
+    logging.info(f'Number of predictions in test_preds: {len(test_preds)}')
+    if test_preds:
+        logging.info(f'Type of first prediction: {type(test_preds[0])}')
+        logging.info(f'Shape of first prediction: {np.array(test_preds[0]).shape}')
+        logging.info(f'First few values of first prediction: {np.array(test_preds[0]).flatten()[:5]}')
+
+    # Ensure test_preds is a list of numpy arrays
+    test_preds_np = [np.array(pred) if not isinstance(pred, np.ndarray) else pred for pred in test_preds]
+  
+    # Stack all predictions
+    test_preds_stacked = np.stack(test_preds_np)
+    test_preds_mean = test_preds_stacked.mean(axis=0)
+
+    logging.info(f'Stacked predictions shape: {test_preds_stacked.shape}')
+    logging.info(f'Mean predictions shape: {test_preds_mean.shape}')
+
+    # Prepare the true labels
+    y_true = test_df[active_label].values
+
+    # Compute regression metrics
+    regression_metrics = {
+        'test_mse': mean_squared_error(y_true, test_preds_mean),
+        'test_rmse': np.sqrt(mean_squared_error(y_true, test_preds_mean)),
+        'test_mae': mean_absolute_error(y_true, test_preds_mean),
+        'test_r2': r2_score(y_true, test_preds_mean),
     }
 
-    # Get mean predictions
-    fp_mean, fn_mean = get_confidence_scores(y, test_preds_mean)
-    majority_vote_metrics['test_false_negatives_mean'] = fn_mean
-    majority_vote_metrics['test_false_positives_mean'] = fp_mean
+    # Compute the standard deviation of predictions (as an uncertainty measure)
+    test_preds_std = test_preds_stacked.std(axis=0)
+    regression_metrics['test_pred_std_mean'] = test_preds_std.mean()
 
-    return majority_vote_metrics
+    # Analyze prediction error distribution
+    errors = np.abs(y_true - test_preds_mean)
+    regression_metrics['test_error_mean'] = errors.mean()
+    regression_metrics['test_error_std'] = errors.std()
+    regression_metrics['test_error_median'] = np.median(errors)
+
+    return regression_metrics
+
+def get_ensemble_metrics(predictions: List[np.ndarray], test_df: pd.DataFrame, target_column: str) -> Dict[str, float]:
+    """
+    Calculate ensemble metrics for regression predictions.
+
+    Args:
+        predictions (List[np.ndarray]): List of prediction arrays from different models.
+        test_df (pd.DataFrame): The test dataframe.
+        target_column (str): The name of the target column.
+
+    Returns:
+        Dict[str, float]: A dictionary containing the ensemble metrics.
+    """
+    # Convert predictions to numpy arrays if they're not already
+    predictions = [p.numpy() if isinstance(p, torch.Tensor) else p for p in predictions]
+    
+    # Calculate the mean prediction across all models
+    ensemble_pred = np.mean(predictions, axis=0)
+    
+    # Get the true values
+    y_true = test_df[target_column].values
+    
+    # Calculate metrics
+    mse = mean_squared_error(y_true, ensemble_pred)
+    mae = mean_absolute_error(y_true, ensemble_pred)
+    r2 = r2_score(y_true, ensemble_pred)
+    
+    # Calculate the standard deviation of predictions across models
+    pred_std = np.std(predictions, axis=0)
+    
+    return {
+        'ensemble_mse': mse,
+        'ensemble_mae': mae,
+        'ensemble_r2': r2,
+        'ensemble_pred_std_mean': np.mean(pred_std),
+        'ensemble_pred_std_max': np.max(pred_std)
+    }
 
 def get_suggestion(trial, dtype, hparams_range):
     if dtype == 'int':
@@ -125,7 +237,8 @@ def pytorch_model_objective(
         test_df: Optional[pd.DataFrame] = None,
         hparams_ranges: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
         fast_dev_run: bool = False,
-        active_label: str = 'Active',
+        #active_label: str = 'Active',
+        active_label: str = 'Dmax (%)',  #change to regression
         disabled_embeddings: List[str] = [],
         max_epochs: int = 100,
         use_logger: bool = False,
@@ -152,7 +265,7 @@ def pytorch_model_objective(
 
     # Suggest hyperparameters to be used accross the CV folds
     hidden_dim = trial.suggest_categorical('hidden_dim', [16, 32, 64, 128, 256, 512])
-    smote_k_neighbors = trial.suggest_categorical('smote_k_neighbors', [0] + list(range(3, 16)))
+    smote_k_neighbors = trial.suggest_categorical('smote_k_neighbors', [0] + list(range(3, 16)))  
     # hidden_dim = trial.suggest_int('hidden_dim', 32, 512, step=32)
     # smote_k_neighbors = trial.suggest_int('smote_k_neighbors', 0, 12)
 
@@ -188,7 +301,9 @@ def pytorch_model_objective(
             'train_perc': len(train_df) / len(train_val_df),
             'val_perc': len(val_df) / len(train_val_df),
         }
-        stats.update(get_dataframe_stats(train_df, val_df, test_df, active_label))
+        #stats.update(get_dataframe_stats(train_df, val_df, test_df, active_label))
+        # When regression
+        stats.update(get_dataframe_stats_regression(train_df, val_df, test_df, active_label)) # When regression
         if groups is not None:
             stats['train_unique_groups'] = len(np.unique(groups[train_index]))
             stats['val_unique_groups'] = len(np.unique(groups[val_index]))
@@ -231,24 +346,43 @@ def pytorch_model_objective(
         report.append(stats.copy())
         val_preds.append(val_pred)
 
+
+    # When regression, save the pred value
+    #     if isinstance(val_pred, torch.Tensor):
+    #         val_pred = val_pred.cpu().numpy()
+    #     val_pred = val_pred.flatten()
+        
+    #     # for evry fold
+    #     fold_val_df = train_val_df.iloc[val_index]
+    #     assert len(val_pred) == len(fold_val_df), f"Fold {k} prediction length ({len(val_pred)}) does not match dataframe length ({len(fold_val_df)})"
+        
+    #     model.save_predictions(fold_val_df[active_label].values, val_pred, f'{logger_save_dir}/{logger_name}_fold{k}_val_predictions.csv')
+   
+
     # Save the report in the trial
     trial.set_user_attr('report', report)
 
     # Get the majority vote for the test predictions
     if test_df is not None and not fast_dev_run:
         majority_vote_metrics = get_majority_vote_metrics(test_preds, test_df, active_label)
-        majority_vote_metrics.update(get_dataframe_stats(train_df, val_df, test_df, active_label))
+        majority_vote_metrics.update(get_dataframe_stats_regression(train_df, val_df, test_df, active_label)) # wehn regression
         trial.set_user_attr('majority_vote_metrics', majority_vote_metrics)
         logging.info(f'Majority vote metrics: {majority_vote_metrics}')
 
     # Get the average validation accuracy and ROC AUC accross the folds
-    val_roc_auc = np.mean([r['val_roc_auc'] for r in report])
-    val_acc = np.mean([r['val_acc'] for r in report])
-    logging.info(f'Average val accuracy: {val_acc}')
-    logging.info(f'Average val ROC AUC: {val_roc_auc}')
+    # val_roc_auc = np.mean([r['val_roc_auc'] for r in report])
+    # val_acc = np.mean([r['val_acc'] for r in report])
+    # logging.info(f'Average val accuracy: {val_acc}')
+    # logging.info(f'Average val ROC AUC: {val_roc_auc}')
 
+    # when regression
+    val_mse = np.mean([r['val_mse'] for r in report])
+    val_mae = np.mean([r['val_mae'] for r in report])
+    logging.info(f'Average val MSE: {val_mse}')
+    logging.info(f'Average val MAE: {val_mae}')
     # Optuna aims to minimize the pytorch_model_objective
-    return - val_roc_auc
+    # return - val_roc_auc
+    return val_mae  #optimal target change to mae
 
 
 def hyperparameter_tuning_and_training(
@@ -366,7 +500,7 @@ def hyperparameter_tuning_and_training(
     best_models = []
     test_report = []
     test_preds = []
-    dfs_stats = get_dataframe_stats(train_val_df, test_df=test_df, active_label=active_label)
+    dfs_stats = get_dataframe_stats_regression(train_val_df, test_df=test_df, active_label=active_label) # when regression
     for i in range(n_models_for_test):
         pl.seed_everything(42 + i + 1)
         model, trainer, metrics, test_pred = train_model(
@@ -390,7 +524,30 @@ def hyperparameter_tuning_and_training(
             # use_batch_norm=True,
             **study.best_params,
         )
+
+        ## save the prediction results
+
+        # if isinstance(test_pred, torch.Tensor):
+        #     test_pred = test_pred.cpu().numpy()
+        # test_pred = test_pred.flatten()
+        
+        # assert len(test_pred) == len(test_df), f"Model {i} test prediction length ({len(test_pred)}) does not match dataframe length ({len(test_df)})"
+        
+        # model.save_predictions(test_df[active_label].values, test_pred, f'{logger_save_dir}/best_model_{i}_test_predictions.csv')
+
+
         # Rename the keys in the metrics dictionary
+
+        # metrics = {k.replace('val_', 'test_'): v for k, v in metrics.items()}
+        # metrics['model_type'] = 'Pytorch'
+        # metrics['test_model_id'] = i
+        # metrics.update(dfs_stats)
+
+        # test_report.append(metrics.copy())
+        # test_preds.append(test_pred)
+        # best_models.append({'model': model, 'trainer': trainer})
+
+        # When regression:
         metrics = {k.replace('val_', 'test_'): v for k, v in metrics.items()}
         metrics['model_type'] = 'Pytorch'
         metrics['test_model_id'] = i
@@ -399,12 +556,26 @@ def hyperparameter_tuning_and_training(
         test_report.append(metrics.copy())
         test_preds.append(test_pred)
         best_models.append({'model': model, 'trainer': trainer})
+
     test_report = pd.DataFrame(test_report)
 
-    # Get the majority vote for the test predictions
+    # # Get the majority vote for the test predictions
+    # if not fast_dev_run:
+    #     majority_vote_metrics = get_majority_vote_metrics(test_preds, test_df, active_label)
+    #     majority_vote_metrics.update(get_dataframe_stats(train_val_df, test_df=test_df, active_label=active_label))
+    #     majority_vote_metrics_cv = study.best_trial.user_attrs['majority_vote_metrics']
+    #     majority_vote_metrics_cv['cv_models'] = True
+    #     majority_vote_report = pd.DataFrame([
+    #         majority_vote_metrics,
+    #         majority_vote_metrics_cv,
+    #     ])
+    #     majority_vote_report['model_type'] = 'Pytorch'
+    #     majority_vote_report['split_type'] = split_type
+
+    # when regression
     if not fast_dev_run:
         majority_vote_metrics = get_majority_vote_metrics(test_preds, test_df, active_label)
-        majority_vote_metrics.update(get_dataframe_stats(train_val_df, test_df=test_df, active_label=active_label))
+        majority_vote_metrics.update(get_dataframe_stats_regression(train_val_df, test_df=test_df, active_label=active_label))
         majority_vote_metrics_cv = study.best_trial.user_attrs['majority_vote_metrics']
         majority_vote_metrics_cv['cv_models'] = True
         majority_vote_report = pd.DataFrame([
@@ -413,72 +584,71 @@ def hyperparameter_tuning_and_training(
         ])
         majority_vote_report['model_type'] = 'Pytorch'
         majority_vote_report['split_type'] = split_type
-
-    # Ablation study: disable embeddings at a time
-    ablation_report = []
-    dfs_stats = get_dataframe_stats(train_val_df, test_df=test_df, active_label=active_label)
-    disabled_embeddings_combinations = [
-        ['e3'],
-        ['poi'],
-        ['cell'],
-        ['smiles'],
-        ['e3', 'cell'],
-        ['poi', 'e3'],
-        ['poi', 'e3', 'cell'],
-    ]
-    for disabled_embeddings in disabled_embeddings_combinations:
-        logging.info('-' * 100)
-        logging.info(f'Ablation study with disabled embeddings: {disabled_embeddings}')
-        logging.info('-' * 100)
-        disabled_embeddings_str = 'disabled ' + ' '.join(disabled_embeddings)
-        test_preds = []
-        for i, model_trainer in enumerate(best_models):
-            logging.info(f'Evaluating model n.{i} on {disabled_embeddings_str}.')
-            model = model_trainer['model']
-            trainer = model_trainer['trainer']
-            _, test_ds, _  = get_datasets(
-                protein2embedding=protein2embedding,
-                cell2embedding=cell2embedding,
-                smiles2fp=smiles2fp,
-                train_df=train_val_df,
-                val_df=test_df,
-                disabled_embeddings=disabled_embeddings,
-                active_label=active_label,
-                scaler=model.scalers,
-                use_single_scaler=model.join_embeddings == 'beginning',
-            )
-            ret = evaluate_model(model, trainer, test_ds, batch_size=128)
-            # NOTE: We are passing the test set as the validation set argument
-            # Rename the keys in the metrics dictionary
-            test_preds.append(ret['val_pred'])
-            ret['val_metrics'] = {k.replace('val_', 'test_'): v for k, v in ret['val_metrics'].items()}
-            ret['val_metrics'].update(dfs_stats)
-            ret['val_metrics']['majority_vote'] = False
-            ret['val_metrics']['model_type'] = 'Pytorch'
-            ret['val_metrics']['disabled_embeddings'] = disabled_embeddings_str
-            ablation_report.append(ret['val_metrics'].copy())
+    # # Ablation study: disable embeddings at a time
+    # ablation_report = []
+    # dfs_stats = get_dataframe_stats(train_val_df, test_df=test_df, active_label=active_label)
+    # disabled_embeddings_combinations = [
+    #     ['e3'],
+    #     ['poi'],
+    #     ['cell'],
+    #     ['smiles'],
+    #     ['e3', 'cell'],
+    #     ['poi', 'e3'],
+    #     ['poi', 'e3', 'cell'],
+    # ]
+    # for disabled_embeddings in disabled_embeddings_combinations:
+    #     logging.info('-' * 100)
+    #     logging.info(f'Ablation study with disabled embeddings: {disabled_embeddings}')
+    #     logging.info('-' * 100)
+    #     disabled_embeddings_str = 'disabled ' + ' '.join(disabled_embeddings)
+    #     test_preds = []
+    #     for i, model_trainer in enumerate(best_models):
+    #         logging.info(f'Evaluating model n.{i} on {disabled_embeddings_str}.')
+    #         model = model_trainer['model']
+    #         trainer = model_trainer['trainer']
+    #         _, test_ds, _  = get_datasets(
+    #             protein2embedding=protein2embedding,
+    #             cell2embedding=cell2embedding,
+    #             smiles2fp=smiles2fp,
+    #             train_df=train_val_df,
+    #             val_df=test_df,
+    #             disabled_embeddings=disabled_embeddings,
+    #             active_label=active_label,
+    #             scaler=model.scalers,
+    #             use_single_scaler=model.join_embeddings == 'beginning',
+    #         )
+    #         ret = evaluate_model(model, trainer, test_ds, batch_size=128)
+    #         # NOTE: We are passing the test set as the validation set argument
+    #         # Rename the keys in the metrics dictionary
+    #         test_preds.append(ret['val_pred'])
+    #         ret['val_metrics'] = {k.replace('val_', 'test_'): v for k, v in ret['val_metrics'].items()}
+    #         ret['val_metrics'].update(dfs_stats)
+    #         ret['val_metrics']['majority_vote'] = False
+    #         ret['val_metrics']['model_type'] = 'Pytorch'
+    #         ret['val_metrics']['disabled_embeddings'] = disabled_embeddings_str
+    #         ablation_report.append(ret['val_metrics'].copy())
 
         # Get the majority vote for the test predictions
-        if not fast_dev_run:
-            majority_vote_metrics = get_majority_vote_metrics(test_preds, test_df, active_label)
-            majority_vote_metrics.update(dfs_stats)
-            majority_vote_metrics['majority_vote'] = True
-            majority_vote_metrics['model_type'] = 'Pytorch'
-            majority_vote_metrics['disabled_embeddings'] = disabled_embeddings_str
-            ablation_report.append(majority_vote_metrics.copy())
+    # if not fast_dev_run:
+    #         majority_vote_metrics = get_majority_vote_metrics(test_preds, test_df, active_label)
+    #         majority_vote_metrics.update(dfs_stats)
+    #         majority_vote_metrics['majority_vote'] = True
+    #         majority_vote_metrics['model_type'] = 'Pytorch'
+    #         majority_vote_metrics['disabled_embeddings'] = disabled_embeddings_str
+    #         ablation_report.append(majority_vote_metrics.copy())
 
-    ablation_report = pd.DataFrame(ablation_report)
+    # # ablation_report = pd.DataFrame(ablation_report)
 
-    # Add a column with the split_type to all reports
-    for report in [cv_report, hparam_report, test_report, ablation_report]:
-        report['split_type'] = split_type
+    # # Add a column with the split_type to all reports
+    # for report in [cv_report, hparam_report, test_report, ablation_report]:
+    #     report['split_type'] = split_type
 
     # Return the reports
     ret = {
         'cv_report': cv_report,
         'hparam_report': hparam_report,
         'test_report': test_report,
-        'ablation_report': ablation_report,
+        #'ablation_report': ablation_report,
     }
     if not fast_dev_run:
         ret['majority_vote_report'] = majority_vote_report

@@ -31,7 +31,7 @@ class PROTAC_Dataset(Dataset):
         smiles2fp: Dict[str, np.ndarray],
         use_smote: bool = False,
         oversampler: Optional[SMOTE | ADASYN] = None,
-        active_label: str = 'Active',
+        active_label: str = 'Dmax (%)',
         disabled_embeddings: List[Literal['smiles', 'poi', 'e3', 'cell']] = [],
         scaler: Optional[StandardScaler | Dict[str, StandardScaler]] = None,
         use_single_scaler: Optional[bool] = None,
@@ -80,7 +80,7 @@ class PROTAC_Dataset(Dataset):
             'Uniprot': self.data['Uniprot'].apply(lambda x: protein2embedding.get(x, self.default_protein_emb).astype(np.float32)).tolist(),
             'E3 Ligase Uniprot': self.data['E3 Ligase Uniprot'].apply(lambda x: protein2embedding.get(x, self.default_protein_emb).astype(np.float32)).tolist(),
             'Cell Line Identifier': self.data['Cell Line Identifier'].apply(lambda x: cell2embedding.get(x, self.default_cell_emb).astype(np.float32)).tolist(),
-            self.active_label: self.data[self.active_label].astype(np.float32).tolist(),
+            self.active_label: (self.data[self.active_label]).astype(np.float32).tolist(),  ##For Dmax
         })
 
         # Apply SMOTE
@@ -353,7 +353,7 @@ def get_datasets(
         protein2embedding,
         cell2embedding,
         smiles2fp,
-        use_smote=True if smote_k_neighbors else False,
+        use_smote=False,#要改
         oversampler=oversampler,
         active_label=active_label,
         disabled_embeddings=disabled_embeddings,
@@ -422,8 +422,8 @@ class PROTAC_DataModule(pl.LightningDataModule):
         cell2embedding_filepath: str,
         pDC50_threshold: float = 6.0,
         Dmax_threshold: float = 0.6,
-        use_smote: bool = True,
-        smote_k_neighbors: int = 5,
+        use_smote: bool = False, # when regression
+        smote_k_neighbors: int = 0,
         active_label: str = 'Active',
         disabled_embeddings: List[Literal['smiles', 'poi', 'e3', 'cell']] = [],
         scaler: Optional[StandardScaler | Dict[str, StandardScaler]] = None,
@@ -432,7 +432,7 @@ class PROTAC_DataModule(pl.LightningDataModule):
         super(PROTAC_DataModule, self).__init__()
 
         # Load the PROTAC dataset
-        self.protac_df = pd.read_csv('../data/PROTAC-Degradation-DB.csv')
+        self.protac_df = pd.read_csv('../data/PROTAC-Degradation-DB-2025.csv')
         # Map E3 Ligase Iap to IAP
         self.protac_df['E3 Ligase'] = self.protac_df['E3 Ligase'].str.replace('Iap', 'IAP')
         self.protac_df[active_label] = self.protac_df.apply(
